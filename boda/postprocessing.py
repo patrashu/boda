@@ -7,14 +7,14 @@ from torch import Tensor
 from torchvision.ops import batched_nms
 
 
-def decode(boxes: Tensor, default_boxes: Tensor, variances: List[float] = [0.1, 0.2]):
+def decode(boxes: Tensor, prior_boxes: Tensor, variances: List[float] = [0.1, 0.2]):
     """Decode locations from predictions using priors to undo
     the encoding we did for offset regression at train time.
 
     https://github.com/Hakuyume/chainer-ssd
 
     Args:
-        loc (FloatTensor[N, 4]): location predictions for loc layers,
+        loc (tensor): location predictions for loc layers,
             Shape: [num_priors, 4]
         priors (tensor): Prior boxes in center-offset form.
             Shape: [num_priors, 4].
@@ -24,8 +24,8 @@ def decode(boxes: Tensor, default_boxes: Tensor, variances: List[float] = [0.1, 
     """
     boxes = torch.cat(
         (
-            default_boxes[:, :2] + boxes[:, :2] * variances[0] * default_boxes[:, 2:],
-            default_boxes[:, 2:] * torch.exp(boxes[:, 2:] * variances[1]),
+            prior_boxes[:, :2] + boxes[:, :2] * variances[0] * prior_boxes[:, 2:],
+            prior_boxes[:, 2:] * torch.exp(boxes[:, 2:] * variances[1]),
         ),
         dim=1,
     )
@@ -92,7 +92,7 @@ def crop(masks, boxes, padding: int = 1) -> Tensor:
     return masks * crop_mask.float()
 
 
-class PostprocessYolact:
+class PostprocessOutputs:
     def __init__(
         self,
         num_classes: int = 80,
@@ -122,15 +122,7 @@ class PostprocessYolact:
     def __call__(
         self, preds: Dict[str, Tensor], image_sizes: List[Tuple[int]]
     ) -> List[Dict[str, Tensor]]:
-        """
-        preds (Dict[str, Tensor]):
-            boxes (FloatTensor[B, N, 4])
-            scores (FloatTensor[B, N, 81])
-
-            mask_coefs (FloatTensor[B, N, 32])
-            default_boxes (FloatTensor[N, 4])
-            proto_masks (FloatTensor[1, 138, 138, 32])
-        """
+        """ """
         pred_boxes = None
         pred_scores = None
         default_boxes = None
@@ -140,7 +132,6 @@ class PostprocessYolact:
             pred_boxes = preds["boxes"]
         if "scores" in preds:
             pred_scores = preds["scores"]
-            print("before", pred_scores.size())
         if "default_boxes" in preds:
             default_boxes = preds["default_boxes"]
         if "mask_coefs" in preds:
@@ -150,24 +141,29 @@ class PostprocessYolact:
 
         batch_size = pred_boxes.size(0)
         num_prior_boxes = default_boxes.size(0)
-        # pred_scores = preds['scores'].view(batch_size, num_prior_boxes, self.num_classes).transpose(2, 1).contiguous()
-
-        pred_scores = preds["scores"].view(
-            batch_size, num_prior_boxes, self.num_classes
+        pred_scores = (
+            preds["scores"]
+            .view(batch_size, num_prior_boxes, self.num_classes)
+            .transpose(2, 1)
+            .contiguous()
         )
-        pred_scores = pred_scores.transpose(2, 1).contiguous()
+
         # test_scores, test_index = torch.max(preds['scores'], dim=1)
 
         return_list = []
+        # print(image_sizes)
         for i, image_size in enumerate(image_sizes):
+            print(i, proto_masks.size())
             decoded_boxes = decode(pred_boxes[i], default_boxes)
             results = self._filter_overlaps(i, decoded_boxes, pred_masks, pred_scores)
+            print(proto_masks[i].dtype)
             results["proto_masks"] = proto_masks[i]
 
             return_list.append(_convert_boxes_and_masks(results, image_size))
+            # return_list.append(results)
 
         for result in return_list:
-            scores = result["scores"].detach()
+            scores = result["scores"].detach().cpu()
             sorted_index = range(len(scores))[: self.top_k]
             # sorted_index = scores.argsort(0, descending=True)[:5]
 
@@ -175,7 +171,6 @@ class PostprocessYolact:
             labels = result["labels"][sorted_index]
             scores = scores[sorted_index]
             masks = result["masks"][sorted_index]
-            print(masks[0].sum())
 
             result["boxes"] = boxes
             result["scores"] = scores
@@ -185,14 +180,12 @@ class PostprocessYolact:
         return return_list
 
     def _filter_overlaps(
-        self, batch_index, decoded_boxes, pred_masks, pred_scores
+        self,
+        batch_index,
+        decoded_boxes,
+        pred_masks,
+        pred_scores,
     ) -> Dict[str, Tensor]:
-        """
-        batch_index (int)
-        decoded_boxes ()
-        pred_masks (FloatTensor[B, N, 32])
-        pred_scores ()
-        """
         scores = pred_scores[batch_index, 1:, :]
         max_scores, labels = torch.max(scores, dim=0)
 
@@ -205,27 +198,19 @@ class PostprocessYolact:
         if scores.size(1) == 0:
             return None
 
+        # print(max_scores[0], max_class[0])
+        print(boxes.size(), scores.size(), keep.size(), labels.size())
+        # boxes, masks, labels, scores = self.nms(boxes, scores, keep, iou_threshold=0.3)
+
         return_dict = defaultdict()
         for _class in range(scores.size(0)):
             _scores = scores[_class, :]
             indices = self.nms(boxes, _scores, labels, iou_threshold=0.3)
 
-<<<<<<< HEAD
-        # print('쉬발?', indices)
-        # print(return_dict['boxes'])
-        # return_dict = {
-        #     'boxes': boxes,
-        #     'mask_coefs': masks,
-        #     'scores': scores,
-        #     # 'labels': labels,
-        #     'proto_masks': None
-        # }
-=======
         return_dict["boxes"] = boxes[indices]
-        return_dict["scores"] = scores[indices]
+        return_dict["scores"] = _scores[indices]
         return_dict["mask_coefs"] = masks[indices]
         return_dict["labels"] = labels[indices]
->>>>>>> 3bb22fa22161a8784839a376492f5d585c87cdf5
 
         return dict(return_dict)
 
@@ -234,9 +219,6 @@ def _convert_boxes_and_masks(preds, size):
     """
     Args:
         preds
-            boxes (FloatTensor[N, 4])
-            mask_coefs (FloatTensor[N, 32])
-            proto_masks (FloatTensor[138, 138, 32])
         size (): (h, w)
 
     """
@@ -244,31 +226,16 @@ def _convert_boxes_and_masks(preds, size):
     boxes = preds["boxes"]
     mask_coefs = preds["mask_coefs"]
     proto_masks = preds["proto_masks"]
-    print(boxes.size(), mask_coefs.size(), proto_masks.size())
 
-    # masks = proto_masks @ mask_coefs.t()
-    masks = torch.matmul(proto_masks, mask_coefs.t())
-    print(mask_coefs)
+    masks = proto_masks @ mask_coefs.t()
     masks = torch.sigmoid(masks)
-    print(masks.size())
-    print(masks[0].sum().long())
 
     masks = crop(masks, boxes)
-
-    masks = masks.permute(2, 0, 1).contiguous()
-<<<<<<< HEAD
-    
-    masks = F.interpolate(masks.unsqueeze(0), (h, w), mode='bilinear', align_corners=False).squeeze(0)
-    masks.gt_(0.5)  # Binarize the masks
-=======
-    print(masks.size())
->>>>>>> 3bb22fa22161a8784839a376492f5d585c87cdf5
-
     masks = F.interpolate(
         masks.unsqueeze(0), (h, w), mode="bilinear", align_corners=False
     ).squeeze(0)
     masks.gt_(0.5)  # Binarize the masks
-    print(masks[0].sum())
+
     boxes[:, 0], boxes[:, 2] = sanitize_coordinates(
         boxes[:, 0], boxes[:, 2], w, cast=False
     )
