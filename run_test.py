@@ -100,7 +100,17 @@ for output in outputs:
         if score >= threshold:
             cx = x2 - x1
             cy = y2 - y1
-            ax.text(x1, y1, f"{COCO_CLASSES[label]}", c='black', size=8, va='bottom', ha='left', alpha=0.5)
+            ax.text(
+                x1, y1, 
+                f"{COCO_CLASSES[label]}", 
+                c='black', size=6, 
+                va='bottom', ha='left', 
+                alpha=1,
+                # bbox=dict(
+                #     facecolor='none',
+                #     edgecolor='black',
+                # )
+            )
 
             rect = patches.Rectangle(
                 (x1, y1),
